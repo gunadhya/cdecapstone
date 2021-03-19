@@ -1,0 +1,185 @@
+version: 2.1
+            
+jobs:
+  linting-v1:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [linting]
+      - run:
+            name: install dependencies
+            command: |
+              wget -O ./hadolint https://github.com/hadolint/hadolint/releases/download/v1.16.3/hadolint-Linux-x86_64 &&\
+              chmod +x ./hadolint
+      - run:
+          name: lint check 1
+          command: |
+            npm install --save-dev htmlhint
+            npx htmlhint "**/*.html"
+      - run:
+          name: lint check 2
+          command: |
+            ./hadolint ./appv1/Dockerfile
+      - save_cache:
+          paths: [node_modules]
+          key: linting
+
+  build-image-v1:
+      docker:
+        - image: circleci/golang:1.15
+          auth:
+            username: gunadhya
+            password: $DOCKERHUB_PASSWORD  
+      steps:
+        - checkout
+        - setup_remote_docker:
+            version: 19.03.13
+        - run:
+            name: build and push docker image
+            command: |
+              cd appv1
+              docker build --tag=testappv1image .
+              echo $DOCKER_PASS | docker login -u gunadhya --password-stdin
+              docker tag testappv1image gunadhya/testappv1image
+              docker push gunadhya/testappv1image
+
+  linting-v2:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [linting-2]
+      - run:
+            name: install dependencies
+            command: |
+              wget -O ./hadolint https://github.com/hadolint/hadolint/releases/download/v1.16.3/hadolint-Linux-x86_64 &&\
+              chmod +x ./hadolint
+      - run:
+          name: lint check 1
+          command: |
+            npm install --save-dev htmlhint
+            npx htmlhint "**/*.html"
+      - run:
+          name: lint check 2
+          command: |
+            ./hadolint ./appv2/Dockerfile
+      - save_cache:
+          paths: [node_modules]
+          key: linting-2
+
+  build-image-v2:
+      docker:
+        - image: circleci/golang:1.15
+          auth:
+            username: gunadhya
+            password: $DOCKERHUB_PASSWORD  
+      steps:
+        - checkout
+        - setup_remote_docker:
+            version: 19.03.13
+        - run:
+            name: build and push docker image
+            command: |
+              cd appv2
+              docker build --tag=testappv2image .
+              echo $DOCKER_PASS | docker login -u gunadhya --password-stdin
+              docker tag testappv2image gunadhya/testappv2image
+              docker push gunadhya/testappv2image
+  
+  deployment:
+      docker:
+        # Docker image here that supports AWS CLI
+        - image: amazon/aws-cli
+      steps:
+        # Checkout code from git
+        - checkout
+        - run:
+            name: deploy appv1
+            command: |
+              # install kubectl
+              curl -o kubectl https://amazon-eks.s3.us-west-2.amazonaws.com/1.19.6/2021-01-05/bin/linux/amd64/kubectl
+              chmod +x ./kubectl
+              mkdir -p $HOME/bin && cp ./kubectl $HOME/bin/kubectl && export PATH=$PATH:$HOME/bin
+              echo 'export PATH=$PATH:$HOME/bin' >> ~/.bashrc
+              
+              # configure kubectl
+              aws --region ap-south-1 eks update-kubeconfig --name mycluster 
+              
+              # test kubectl
+              kubectl version
+
+              # get services
+              kubectl get svc
+
+              # change directory
+              cd kube
+
+              # create a deployment
+              kubectl apply -f mydeploy.yml
+
+              # create a service 
+              kubectl apply -f myservice.yml
+
+              sleep 3m
+              
+              # get services after
+              kubectl get svc
+
+            no_output_timeout: 30m
+  
+  rolling-update:
+      docker:
+        # Docker image here that supports AWS CLI
+        - image: amazon/aws-cli
+      steps:
+        # Checkout code from git
+        - checkout
+        - run:
+            name: deploy appv2 by rolling update
+            command: |
+              # install kubectl
+              curl -o kubectl https://amazon-eks.s3.us-west-2.amazonaws.com/1.19.6/2021-01-05/bin/linux/amd64/kubectl
+              chmod +x ./kubectl
+              mkdir -p $HOME/bin && cp ./kubectl $HOME/bin/kubectl && export PATH=$PATH:$HOME/bin
+              echo 'export PATH=$PATH:$HOME/bin' >> ~/.bashrc
+              
+              # configure kubectl
+              aws --region ap-south-1 eks update-kubeconfig --name mycluster 
+              
+              # test kubectl
+              kubectl version
+
+              # get services before
+              kubectl get svc
+
+              # change directory
+              cd kube
+
+              # update app to version2
+              # do a rolling update based on update strategy
+              kubectl apply -f rolling.yml
+
+              sleep 3m
+
+              # get services after
+              kubectl get svc
+
+            no_output_timeout: 30m
+        
+workflows:
+  default:
+    jobs:
+      - linting-v1
+      - build-image-v1:
+          requires: [linting-v1]
+      - linting-v2:
+          requires: [build-image-v1]
+      - build-image-v2:
+          requires: [linting-v2]
+      - deployment:
+          requires: [build-image-v2]
+      - rolling-update:
+          requires: [deployment]
